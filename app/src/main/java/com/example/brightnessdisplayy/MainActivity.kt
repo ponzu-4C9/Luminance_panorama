@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
+import android.util.Log
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +20,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.min
+import android.util.Size
 
 class MainActivity : AppCompatActivity() {
 
@@ -58,6 +60,7 @@ class MainActivity : AppCompatActivity() {
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .setTargetResolution(Size(2448 , 2448))
                 .build()
 
             analysis.setAnalyzer(cameraExecutor, Optical_Flow { dx, dy, bmp ->
@@ -82,6 +85,7 @@ class MainActivity : AppCompatActivity() {
      * 光学式マウスのように、前フレームと現在フレームの中心 50x50 の Y（輝度）だけを比較して
      * もっとも一致するシフト量 (dx, dy) を SAD（Sum of Absolute Differences）で推定します。
      *
+     * - swap 方式でバッファを再利用（メモリアロケーション・コピー最小化）
      * - dx, dy は「画面表示の向き」に合わせて回転した結果を listener に渡します。
      * - 画像はグレースケール（Y）だけで Bitmap を作って listener に渡します（回転適用）。
      */
@@ -92,9 +96,11 @@ class MainActivity : AppCompatActivity() {
         private val cropSize: Int = 50
         private val searchRadius: Int = 5 // 探索窓（+- このピクセル範囲で探索）
 
-        // 前回フレームの中心 50x50 の Y（輝度）を保持
-        private var prevY: ByteArray? = null
-        private var prevSide: Int = 0
+        // swap 方式のバッファ。bufA = 前フレーム, bufB = 現フレーム（フレーム終端で swap）
+        private var bufA: ByteArray? = null
+        private var bufB: ByteArray? = null
+        private var bufSide: Int = 0
+        private var hasPrev: Boolean = false
 
         override fun analyze(image: ImageProxy) {
             try {
@@ -106,17 +112,26 @@ class MainActivity : AppCompatActivity() {
 
                 val width = image.width
                 val height = image.height
+                Log.d("Optical_Flow", "analyze: $width x $height")
 
                 val side = min(min(cropSize, width), height)
                 val left = (width - side) / 2
                 val top = (height - side) / 2
 
-                // 中心 50x50 の Y を取り出しつつ、表示用の ARGB も作る
-                val cropY = ByteArray(side * side) // Y（輝度）の生値（Byte: -128..127）を格納
-                val pixels = IntArray(side * side) // 表示用 ARGB（不透明グレー）
+                // バッファ確保（サイズ変更時も再確保）
+                if (bufA == null || bufB == null || bufSide != side) {
+                    bufSide = side
+                    bufA = ByteArray(side * side)
+                    bufB = ByteArray(side * side)
+                    hasPrev = false
+                }
+
+                // 現在フレームを bufB に直接読み込む。表示用 ARGB も同時に作る。
+                val cur = bufB!!
+                val pixels = IntArray(side * side)
 
                 val yDup = yBuffer.duplicate()
-                yDup.clear() // position=0, limit=capacity に
+                yDup.clear() // position=0, limit=capacity
 
                 var idx = 0
                 val rowBytes = ByteArray(side)
@@ -126,19 +141,19 @@ class MainActivity : AppCompatActivity() {
                     yDup.get(rowBytes, 0, side)
 
                     for (col in 0 until side) {
-                        val b = rowBytes[col]              // Byte
-                        cropY[idx] = b                      // Y をそのまま保存
-                        val v = b.toInt() and 0xFF          // 0..255 に正規化
+                        val b = rowBytes[col]         // Byte (-128..127)
+                        cur[idx] = b                   // 現在フレームの Y を保存
+                        val v = b.toInt() and 0xFF     // 0..255
                         pixels[idx] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
                         idx++
                     }
                 }
 
-                // ここで前回フレームと比較して (dx, dy) を推定（センサー座標系）
+                // 前回フレーム（bufA）と比較して (dx, dy) を推定（センサー座標系）
                 var dxSensor = 0
                 var dySensor = 0
-                val prevLocal = prevY
-                if (prevLocal != null && prevSide == side) {
+                val prevLocal = bufA
+                if (hasPrev && prevLocal != null) {
                     var bestScore = Long.MAX_VALUE
                     var bestDx = 0
                     var bestDy = 0
@@ -161,12 +176,10 @@ class MainActivity : AppCompatActivity() {
                                 val iCurRow = y * side
                                 val iPrevRow = (y - dy) * side
                                 for (x in xStart until xEnd) {
-                                    val cur = cropY[iCurRow + x].toInt() and 0xFF
-                                    val prv = prevLocal[iPrevRow + (x - dx)].toInt() and 0xFF
-                                    sad += abs(cur - prv)
-                                    if (sad >= bestScore) {
-                                        break@loop
-                                    }
+                                    val curVal = cur[iCurRow + x].toInt() and 0xFF
+                                    val prvVal = prevLocal[iPrevRow + (x - dx)].toInt() and 0xFF
+                                    sad += abs(curVal - prvVal)
+                                    if (sad >= bestScore) break@loop
                                 }
                             }
 
@@ -202,9 +215,11 @@ class MainActivity : AppCompatActivity() {
                 // コールバック
                 listener(dxDisplay, dyDisplay, rotated)
 
-                // 現在のフレームを次回用に保持
-                prevY = cropY
-                prevSide = side
+                // 次回用に swap（bufA ← 現在, bufB ← 前回）
+                val tmp = bufA
+                bufA = bufB
+                bufB = tmp
+                hasPrev = true
 
             } catch (t: Throwable) {
                 // 必要ならログ
