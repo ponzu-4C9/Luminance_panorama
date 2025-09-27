@@ -23,10 +23,11 @@ import kotlin.math.min
 import android.util.Size
 import android.widget.Button
 
-private var x = 0
-private var y = 0
+@Volatile
+private var resetRequested = false
 
 class MainActivity : AppCompatActivity() {
+
 
     private lateinit var imageView: ImageView
     private lateinit var textView: TextView
@@ -48,9 +49,8 @@ class MainActivity : AppCompatActivity() {
         imageView = findViewById(R.id.processedView)
         textView = findViewById(R.id.textView)
         button = findViewById(R.id.button)
-        button.setOnClickListener {
-            x = 0
-            y = 0
+        button.setOnClickListener{
+            resetRequested = true
         }
         cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -114,8 +114,19 @@ class MainActivity : AppCompatActivity() {
         private var bufSide: Int = 0
         private var hasPrev: Boolean = false
 
+        private var cumulativeX = 0
+        private var cumulativeY = 0
+
+
         override fun analyze(image: ImageProxy) {
             try {
+                if (resetRequested) {
+                    cumulativeX = 0
+                    cumulativeY = 0
+                    hasPrev = false       // 基準フレームもリセット
+                    resetRequested = false
+                }
+
                 val yPlane = image.planes[0]
                 val yBuffer: ByteBuffer = yPlane.buffer
                 val yRowStride = yPlane.rowStride
@@ -224,10 +235,10 @@ class MainActivity : AppCompatActivity() {
                 // センサー座標の (dx,dy) を「画面表示の向き」に合わせて回転
                 val (dxDisplay, dyDisplay) = rotateDeltaByDegrees(dxSensor, dySensor, rotation)
 
-                x += dxDisplay
-                y += dyDisplay
+                cumulativeX += dxDisplay
+                cumulativeY += dyDisplay
                 // コールバック
-                listener(x, y, rotated)
+                listener(cumulativeX, cumulativeY, rotated)
 
                 // 次回用に swap（bufA ← 現在, bufB ← 前回）
                 val tmp = bufA
