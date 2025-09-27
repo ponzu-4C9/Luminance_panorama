@@ -21,11 +21,18 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.min
 import android.util.Size
+import android.widget.Button
+
+private var x = 0
+private var y = 0
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var imageView: ImageView
     private lateinit var textView: TextView
+
+    private lateinit var button: Button
+
     private lateinit var cameraExecutor: ExecutorService
 
     private val requestPermission =
@@ -34,12 +41,17 @@ class MainActivity : AppCompatActivity() {
             else finish() // 権限がないと動かないので終了
         }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(savedInstanceState: Bundle?){
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         imageView = findViewById(R.id.processedView)
         textView = findViewById(R.id.textView)
+        button = findViewById(R.id.button)
+        button.setOnClickListener {
+            x = 0
+            y = 0
+        }
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -212,8 +224,10 @@ class MainActivity : AppCompatActivity() {
                 // センサー座標の (dx,dy) を「画面表示の向き」に合わせて回転
                 val (dxDisplay, dyDisplay) = rotateDeltaByDegrees(dxSensor, dySensor, rotation)
 
+                x += dxDisplay
+                y += dyDisplay
                 // コールバック
-                listener(dxDisplay, dyDisplay, rotated)
+                listener(x, y, rotated)
 
                 // 次回用に swap（bufA ← 現在, bufB ← 前回）
                 val tmp = bufA
